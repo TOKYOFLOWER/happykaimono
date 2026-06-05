@@ -4,4 +4,4 @@
  *
  * 未設定時は docs/data/stores.json (座標なし) をフォールバックとして読み込みます。
  */
-const GAS_API_URL = 'YOUR_GAS_WEB_APP_URL_HERE';
+const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbwM_x2T1rVm5hQUFSTwfLkSUbtL_bwvT0aPokC98O5fEVQN9IMewlgfMFsP75TQ4D-WOA/exec';
