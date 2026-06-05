@@ -12,8 +12,8 @@
  *
  * [ジオコーディング手順]
  * 1. メニュー「拡張機能」→「Apps Script」でこのコードを全て貼り付ける
- * 2. setupHeaders() を一度実行して lat/lng/geocode_status 列を追加する
- * 3. geocodeAll() を実行する（1回あたり最大450件処理）
+ * 2. setupHeaders() を一度だけ実行して lat/lng/geocode_status 列を追加する
+ * 3. geocodeAll() を繰り返し実行する（1回あたり最大450件 or 5分で自動停止）
  *
  *    ★ Maps.newGeocoder() の無料クォータは1日約1,000件です。
  *    ★ 1,783件を処理するには最低2日かかります。運用例:
@@ -21,8 +21,7 @@
  *       2日目: geocodeAll() を 2回実行（残りを処理）
  *    ★ geocode_status が「OK」または「FAILED」の行は再実行時にスキップ
  *       されるため、何度実行しても安全です（冪等）。
- *    ★ FAILED になった行は geocode_address を手動修正して
- *       geocode_status を空白にすると次回の実行対象になります。
+ *    ★ FAILED の行を再試行するには geocode_status セルを空白にしてください。
  *
  * [ウェブアプリ デプロイ手順]
  * 1. Apps Script エディタ右上「デプロイ」→「新しいデプロイ」
@@ -59,116 +58,179 @@ var COL = {
 };
 
 var SHEET_NAME  = 'stores';
-var MAX_PER_RUN = 450;    // 1実行あたりの最大処理件数（6分制限対策）
-var SLEEP_MS    = 200;    // API 呼び出し間隔 (ms)
+var MAX_PER_RUN = 450;          // 1実行あたりの最大処理件数
+var SLEEP_MS    = 200;          // Geocoding API 呼び出し間隔 (ms)
+var MAX_MS      = 5 * 60 * 1000; // 実行時間上限 5分 (ms)
 
 
 // ──────────────────────────────────────
 //  setupHeaders: 初回実行用ヘッダ追加
+//  ※ データ行への書き込みは一切しない
 // ──────────────────────────────────────
 function setupHeaders() {
-  var ss    = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAME);
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
   if (!sheet) {
-    SpreadsheetApp.getUi().alert('シート「' + SHEET_NAME + '」が見つかりません。');
+    SpreadsheetApp.getUi().alert('シート「' + SHEET_NAME + '」が見つかりません。\nシート名を確認してください。');
     return;
   }
-  sheet.getRange(1, COL.LAT).setValue('lat');
-  sheet.getRange(1, COL.LNG).setValue('lng');
-  sheet.getRange(1, COL.GEOCODE_STATUS).setValue('geocode_status');
-  SpreadsheetApp.getUi().alert('lat / lng / geocode_status 列を追加しました。次に geocodeAll() を実行してください。');
+
+  // 1行で3セルをまとめて書き込む（個別 setValue を避けてタイムアウト防止）
+  sheet.getRange(1, COL.LAT, 1, 3).setValues([['lat', 'lng', 'geocode_status']]);
+
+  SpreadsheetApp.getUi().alert(
+    'K1: lat / L1: lng / M1: geocode_status を追加しました。\n' +
+    '次に geocodeAll() を実行してください。\n' +
+    '（geocode_status が空欄の行を未処理として扱います）'
+  );
 }
 
 
 // ──────────────────────────────────────
 //  geocodeAll: ジオコーディング実行
+//  ─ 全データ一括読み込み → メモリ処理 → 範囲一括書き込み
+//  ─ 停止条件: 450件処理 OR 5分経過（先に来た方）
+//  ─ geocode_status が空欄の行のみ処理（OK / FAILED はスキップ）
 // ──────────────────────────────────────
 function geocodeAll() {
-  var ss    = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAME);
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
   if (!sheet) {
-    throw new Error('シート「' + SHEET_NAME + '」が見つかりません。');
+    SpreadsheetApp.getUi().alert('シート「' + SHEET_NAME + '」が見つかりません。');
+    return;
   }
 
-  // geocode_status 列が無ければ作成
-  if (!sheet.getRange(1, COL.GEOCODE_STATUS).getValue()) {
-    sheet.getRange(1, COL.LAT).setValue('lat');
-    sheet.getRange(1, COL.LNG).setValue('lng');
-    sheet.getRange(1, COL.GEOCODE_STATUS).setValue('geocode_status');
+  var lastRow     = sheet.getLastRow();
+  var numDataRows = lastRow - 1; // ヘッダ除く
+  if (numDataRows <= 0) {
+    SpreadsheetApp.getUi().alert('データ行がありません。');
+    return;
   }
 
-  var lastRow   = sheet.getLastRow();
-  var processed = 0;
-  var okCount   = 0;
-  var failCount = 0;
+  // ① 全データを一括読み込み（Sheets API 呼び出し: 1回）
+  var allData = sheet.getRange(2, 1, numDataRows, COL.GEOCODE_STATUS).getValues();
+  // allData[i][j] は 0-indexed。列 COL.XXX に対応する値は allData[i][COL.XXX - 1]
 
-  // 全ステータスを一括取得して行処理を高速化
-  var statusCol  = sheet.getRange(2, COL.GEOCODE_STATUS, lastRow - 1, 1).getValues();
-  var geocodeCol = sheet.getRange(2, COL.GEOCODE_ADDRESS, lastRow - 1, 1).getValues();
+  // 事前に未処理件数をカウント
+  var totalPending = 0;
+  for (var i = 0; i < allData.length; i++) {
+    var s = String(allData[i][COL.GEOCODE_STATUS - 1]).trim();
+    if (s !== 'OK' && s !== 'FAILED') totalPending++;
+  }
+  Logger.log('実行開始 — 未処理件数: ' + totalPending);
 
-  for (var i = 0; i < statusCol.length; i++) {
-    var row    = i + 2;  // 実際の行番号 (1行目はヘッダ)
-    var status = String(statusCol[i][0]).trim();
+  if (totalPending === 0) {
+    SpreadsheetApp.getUi().alert('未処理行がありません。ジオコーディングは既に完了しています。');
+    return;
+  }
 
-    // OK / FAILED はスキップ（冪等）
+  // ② メモリ上で処理し、更新内容を蓄積
+  var startTime  = new Date().getTime();
+  var processed  = 0, okCount = 0, failCount = 0;
+  // updates: {dataRowIndex: [lat, lng, status]} (データ行の 0-based インデックス)
+  var updates    = {};
+  var minUpdIdx  = numDataRows; // 更新行の最小インデックス（書き込み範囲計算用）
+  var maxUpdIdx  = -1;          // 更新行の最大インデックス
+
+  for (var i = 0; i < allData.length; i++) {
+    var status = String(allData[i][COL.GEOCODE_STATUS - 1]).trim();
+
+    // OK / FAILED はスキップ（冪等性の確保）
     if (status === 'OK' || status === 'FAILED') continue;
 
-    // 上限チェック
-    if (processed >= MAX_PER_RUN) {
-      Logger.log('上限 ' + MAX_PER_RUN + ' 件に達しました。続きは次回実行してください。');
+    // ── 停止判定（件数 or 時間） ──
+    var elapsed = new Date().getTime() - startTime;
+    if (processed >= MAX_PER_RUN || elapsed >= MAX_MS) {
+      Logger.log('停止: processed=' + processed + '件, elapsed=' +
+                 Math.round(elapsed / 1000) + '秒');
       break;
     }
 
-    var geocodeAddr = String(geocodeCol[i][0]).trim();
+    var geocodeAddr = String(allData[i][COL.GEOCODE_ADDRESS - 1]).trim();
+    var newLat = '', newLng = '', newStatus = 'FAILED';
+
     if (!geocodeAddr) {
-      sheet.getRange(row, COL.GEOCODE_STATUS).setValue('FAILED');
+      // geocode_address が空 → FAILED
+      newStatus = 'FAILED';
       failCount++;
-      processed++;
-      continue;
-    }
+    } else {
+      try {
+        var result = Maps.newGeocoder()
+                         .setLanguage('ja')
+                         .setRegion('JP')
+                         .geocode(geocodeAddr);
 
-    try {
-      var result = Maps.newGeocoder()
-                       .setLanguage('ja')
-                       .setRegion('JP')
-                       .geocode(geocodeAddr);
-
-      if (result.status === 'OK' && result.results && result.results.length > 0) {
-        var loc = result.results[0].geometry.location;
-        sheet.getRange(row, COL.LAT).setValue(loc.lat);
-        sheet.getRange(row, COL.LNG).setValue(loc.lng);
-        sheet.getRange(row, COL.GEOCODE_STATUS).setValue('OK');
-        okCount++;
-      } else {
-        Logger.log('Row ' + row + ': geocode status=' + result.status + ', addr=' + geocodeAddr);
-        sheet.getRange(row, COL.GEOCODE_STATUS).setValue('FAILED');
+        if (result.status === 'OK' && result.results && result.results.length > 0) {
+          var loc = result.results[0].geometry.location;
+          newLat    = loc.lat;
+          newLng    = loc.lng;
+          newStatus = 'OK';
+          okCount++;
+        } else {
+          Logger.log('FAILED dataRow=' + i + ' status=' + result.status +
+                     ' addr=' + geocodeAddr);
+          newStatus = 'FAILED';
+          failCount++;
+        }
+      } catch (e) {
+        Logger.log('ERROR dataRow=' + i + ': ' + e.message);
+        newStatus = 'FAILED';
         failCount++;
       }
-    } catch (e) {
-      Logger.log('Row ' + row + ' exception: ' + e.message);
-      sheet.getRange(row, COL.GEOCODE_STATUS).setValue('FAILED');
-      failCount++;
     }
+
+    // 更新内容をメモリに蓄積（まだシートに書かない）
+    updates[i] = [newLat, newLng, newStatus];
+    if (i < minUpdIdx) minUpdIdx = i;
+    if (i > maxUpdIdx) maxUpdIdx = i;
 
     processed++;
     Utilities.sleep(SLEEP_MS);
   }
 
-  // 残り件数を集計
-  var remaining = 0;
-  var updatedStatus = sheet.getRange(2, COL.GEOCODE_STATUS, lastRow - 1, 1).getValues();
-  for (var j = 0; j < updatedStatus.length; j++) {
-    var s = String(updatedStatus[j][0]).trim();
-    if (s !== 'OK' && s !== 'FAILED') remaining++;
+  // ③ 処理結果をシートへ一括書き込み（Sheets API 呼び出し: 最大2回）
+  if (maxUpdIdx >= 0) {
+    var writeStartRow = minUpdIdx + 2;           // シート上の開始行（ヘッダ=1行目分 +1）
+    var rangeHeight   = maxUpdIdx - minUpdIdx + 1;
+
+    // 対象範囲の現在値を読み込み（未処理行を上書きしないため）
+    // Sheets API 呼び出し: 1回
+    var existing = sheet
+      .getRange(writeStartRow, COL.LAT, rangeHeight, 3)
+      .getValues();
+
+    // メモリ上で更新を適用
+    for (var i = minUpdIdx; i <= maxUpdIdx; i++) {
+      if (updates[i]) {
+        var rel = i - minUpdIdx;
+        existing[rel][0] = updates[i][0]; // lat
+        existing[rel][1] = updates[i][1]; // lng
+        existing[rel][2] = updates[i][2]; // geocode_status
+      }
+    }
+
+    // 一括書き込み: Sheets API 呼び出し 1回のみ
+    sheet.getRange(writeStartRow, COL.LAT, rangeHeight, 3).setValues(existing);
+    Logger.log('書き込み完了: シート行 ' + writeStartRow +
+               ' 〜 ' + (writeStartRow + rangeHeight - 1) +
+               ' (' + rangeHeight + '行の範囲に setValues)');
   }
 
+  // ④ 残り件数を算出（一括取得の数 - 今回処理数）
+  var remaining = totalPending - processed;
+  var elapsedSec = Math.round((new Date().getTime() - startTime) / 1000);
+
   var msg = [
+    '━━ 実行結果 ━━',
     '今回処理: ' + processed + ' 件',
-    '  OK     : ' + okCount + ' 件',
-    '  FAILED : ' + failCount + ' 件',
+    '  OK    : ' + okCount + ' 件',
+    '  FAILED: ' + failCount + ' 件',
+    '経過時間: ' + elapsedSec + ' 秒',
     '残り未処理: ' + remaining + ' 件',
-    remaining > 0 ? '\n残りがあります。再度 geocodeAll() を実行してください。' : '\nジオコーディング完了！'
+    '',
+    remaining > 0
+      ? '▶ 残りがあります。再度 geocodeAll() を実行してください。'
+      : '✓ 全行のジオコーディングが完了しました！'
   ].join('\n');
+
   Logger.log(msg);
   SpreadsheetApp.getUi().alert(msg);
 }
@@ -176,9 +238,10 @@ function geocodeAll() {
 
 // ──────────────────────────────────────
 //  doGet: JSON API エンドポイント
+//  ─ lat/lng がある行のみ返す
+//  ─ 15分キャッシュ
 // ──────────────────────────────────────
 function doGet(e) {
-  // CORS ヘッダ対応（GAS は自動で付与するが念のため）
   var cache    = CacheService.getScriptCache();
   var cacheKey = 'stores_v2';
   var cached   = cache.get(cacheKey);
@@ -189,8 +252,7 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  var ss    = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAME);
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
   if (!sheet) {
     return ContentService
       .createTextOutput(JSON.stringify({ error: 'Sheet not found' }))
@@ -204,26 +266,23 @@ function doGet(e) {
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 全データを一括取得（API呼び出し最小化）
-  var data = sheet.getRange(2, 1, lastRow - 1, COL.GEOCODE_STATUS).getValues();
-  var stores = [];
+  // 全データを一括取得（Sheets API 呼び出し: 1回）
+  var allData = sheet.getRange(2, 1, lastRow - 1, COL.GEOCODE_STATUS).getValues();
+  var stores  = [];
 
-  for (var i = 0; i < data.length; i++) {
-    var row = data[i];
+  for (var i = 0; i < allData.length; i++) {
+    var row = allData[i];
     var lat = row[COL.LAT - 1];
     var lng = row[COL.LNG - 1];
+    if (!lat || !lng) continue; // 座標なし行を除外
 
-    // 座標が無い行は除外
-    if (!lat || !lng) continue;
-
-    // フロント表示に必要なフィールドのみ返す（容量削減）
     stores.push({
-      name:        row[COL.NAME - 1],
-      address:     row[COL.ADDRESS - 1],
-      tel:         row[COL.TEL - 1],
-      contact:     row[COL.CONTACT - 1] || '',
+      name:        row[COL.NAME        - 1],
+      address:     row[COL.ADDRESS     - 1],
+      tel:         row[COL.TEL         - 1],
+      contact:     row[COL.CONTACT     - 1] || '',
       category_no: Number(row[COL.CATEGORY_NO - 1]),
-      genre:       row[COL.GENRE - 1],
+      genre:       row[COL.GENRE       - 1],
       ticket_type: row[COL.TICKET_TYPE - 1],
       lat:         lat,
       lng:         lng,
@@ -231,8 +290,9 @@ function doGet(e) {
   }
 
   var json = JSON.stringify({ stores: stores });
-  // 15分キャッシュ（900秒）
-  try { cache.put(cacheKey, json, 900); } catch (ex) { /* キャッシュサイズ超過時は無視 */ }
+
+  // 15分キャッシュ（100KB超の場合は無視してキャッシュしない）
+  try { cache.put(cacheKey, json, 900); } catch (ex) { /* キャッシュ容量超過は許容 */ }
 
   return ContentService
     .createTextOutput(json)
