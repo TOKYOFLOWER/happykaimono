@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>中央区ハッピー買物券2026 取扱店マップ</title>
+  <meta name="description" content="中央区共通買物券（ハッピー買物券2026）の取扱店を地図で検索できます。">
+
+  <!-- OGP -->
+  <meta property="og:title" content="中央区ハッピー買物券2026 取扱店マップ">
+  <meta property="og:description" content="中央区共通買物券（ハッピー買物券2026）の取扱店を地図で検索できます。">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="ja_JP">
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <!-- MarkerCluster CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+
+  <!-- App CSS -->
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+
+<!-- ツールバー -->
+<div id="toolbar">
+  <div id="search-row">
+    <input type="search" id="search" placeholder="店名・住所で検索" autocomplete="off">
+    <button id="btn-location" title="現在地">📍</button>
+    <span id="store-count">―</span>
+  </div>
+  <div id="chip-row">
+    <!-- JS で生成 -->
+    <button id="btn-detail">詳細▼</button>
+  </div>
+</div>
+
+<!-- 地図 -->
+<div id="map"></div>
+
+<!-- 凡例 -->
+<div id="legend">
+  <div><span class="legend-dot" style="background:#1976D2"></span>全券種利用可</div>
+  <div><span class="legend-dot" style="background:#7B1FA2"></span>むらさき色の券のみ</div>
+</div>
+
+<!-- ローディング -->
+<div id="loading">
+  <div class="spinner"></div>
+  <span>取扱店データを読み込み中…</span>
+</div>
+
+<!-- エラー / メッセージ -->
+<div id="error-msg"></div>
+
+<!-- ボトムシート背景タップ閉じ -->
+<div id="sheet-overlay" onclick="closeSheet()"></div>
+
+<!-- ボトムシート -->
+<div id="bottom-sheet">
+  <div class="sheet-handle"></div>
+  <div class="sheet-body">
+    <h2 id="store-name"></h2>
+    <span id="store-badge">むらさき色の券のみ</span>
+
+    <div class="sheet-row">
+      <span class="sheet-label">業種</span>
+      <span class="sheet-value" id="store-genre"></span>
+    </div>
+    <div class="sheet-row">
+      <span class="sheet-label">住所</span>
+      <span class="sheet-value" id="store-address"></span>
+    </div>
+    <div class="sheet-row" id="store-tel-row">
+      <span class="sheet-label">電話</span>
+      <a class="sheet-value" id="store-tel-link"></a>
+    </div>
+    <div class="sheet-row" id="store-contact-row">
+      <span class="sheet-label">連絡先</span>
+      <a class="sheet-value" id="store-contact-link" target="_blank" rel="noopener"></a>
+    </div>
+
+    <div class="sheet-actions">
+      <a id="btn-tel-action" class="btn-action btn-tel">📞 電話する</a>
+      <a id="btn-directions" class="btn-action btn-map" target="_blank" rel="noopener">
+        🗺️ 経路を見る
+      </a>
+    </div>
+  </div>
+</div>
+
+<!-- 詳細カテゴリモーダル -->
+<div id="modal-overlay">
+  <div id="modal">
+    <h3>カテゴリを選択</h3>
+    <div id="modal-cat-grid" class="modal-cat-grid">
+      <!-- JS で生成 -->
+    </div>
+    <div class="modal-footer">
+      <button id="btn-modal-reset">リセット</button>
+      <button id="btn-modal-apply">この条件で絞る</button>
+    </div>
+  </div>
+</div>
+
+<!-- フッター注記 -->
+<div id="footer-note">
+  取扱店は予告なく変更・取消の場合があります（令和8年6月1日現在）
+</div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV/XN/WLnA=" crossorigin=""></script>
+<!-- MarkerCluster JS -->
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+
+<!-- アプリ -->
+<script src="./js/config.js"></script>
+<script src="./js/app.js"></script>
+</body>
+</html>

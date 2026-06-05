@@ -22,42 +22,34 @@ DAITEN_PDF = "daiten_260601.pdf"
 STORES_CSV = "stores.csv"
 ERRORS_CSV = "errors.csv"
 
-# x 座標によるカラム境界 (pt 単位)
-#   tempo:  name(<245) | addr(245-422) | tel(422-490) | genre(490+)
-#   daiten: name(<240) | addr(240-403) | tel(403-455) | genre(455+)
 THRESHOLDS = {
     "tempo":  {"name_end": 245, "tel_start": 422, "genre_start": 490},
     "daiten": {"name_end": 240, "tel_start": 403, "genre_start": 455},
 }
 
-# 行グループ化の y 許容幅 (同一行とみなす最大 y 差)
 Y_GAP = 6
-
-# カテゴリ見出し正規表現: "1.コンビニ、雑貨" など
 CAT_RE = re.compile(r"^(\d+)[．.。]\s*(.+)$")
 
-# 電話番号パターン (正規化済み半角) : 0XX-XXXX-XXXX 形式
 PHONE_RE = re.compile(
-    r"^0\d{1,4}-\d{2,4}-\d{3,4}$"      # 一般固定/携帯
-    r"|^0\d{8,10}$"                      # ハイフンなし
-    r"|^0[57]0-\d{4}-\d{4}$"            # 050/070
+    r"^0\d{1,4}-\d{2,4}-\d{3,4}$"
+    r"|^0\d{8,10}$"
+    r"|^0[57]0-\d{4}-\d{4}$"
 )
 
-# スキップすべきヘッダ文字列 (部分一致)
 SKIP_FRAGMENTS = [
     "中央区内共通買物券（ハッピー買物券2026）取扱店一覧",
-    "令和８年度　区内共通買物",
-    "令和８年度 区内共通買物",
-    "令和８年度",
-    "令和8年6月1日現在",
-    "更、取り消しが発生する場合",
-    "ご利用いただけます。",
-    "取扱店について予告なく変",
-    "予めご了承ください",
+    "令和８年度　区内共通買物", "令和８年度 区内共通買物", "令和８年度",
+    "令和8年6月1日現在", "更、取り消しが発生する場合",
+    "ご利用いただけます。", "取扱店について予告なく変", "予めご了承ください",
 ]
-# 完全一致でスキップするもの
 SKIP_EXACT = {"店舗名", "住", "所", "電話番号", "業", "種", "ページ",
               "【中小小売店】", "令和8年6月1日現在"}
+
+# メールアドレス / URL 抽出パターン
+CONTACT_RE = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"  # email
+    r"|https?://\S+"                                         # URL
+)
 
 GEO_PREFIX = "東京都中央区"
 
@@ -67,7 +59,6 @@ GEO_PREFIX = "東京都中央区"
 # ────────────────────────────────────────
 
 def fw2hw(text: str) -> str:
-    """全角英数を半角に変換"""
     result = []
     for ch in text:
         cp = ord(ch)
@@ -81,10 +72,8 @@ def fw2hw(text: str) -> str:
 
 
 def normalize_phone(raw: str) -> str:
-    """電話番号の表記揺れを正規化 (ダッシュ・全角数字)"""
     t = raw.strip()
-    # 各種ダッシュ → ハイフン
-    for dash in ["ー", "－", "ｰ", "‐", "—", "–"]:
+    for dash in ["ー", "－", "ｰ", "‐", "—", "–", "−"]:
         t = t.replace(dash, "-")
     t = fw2hw(t)
     return t
@@ -95,10 +84,9 @@ def is_valid_phone(raw: str) -> bool:
 
 
 def should_skip_word(text: str) -> bool:
-    """ヘッダ・ページ番号等の不要テキストかどうか"""
     if text in SKIP_EXACT:
         return True
-    if re.match(r"^\d+\s*/\s*\d+$", text):  # "1 / 31" 等
+    if re.match(r"^\d+\s*/\s*\d+$", text):
         return True
     for frag in SKIP_FRAGMENTS:
         if frag in text:
@@ -107,12 +95,21 @@ def should_skip_word(text: str) -> bool:
 
 
 def make_geocode_addr(main_addr: str) -> str:
-    """geocode_address を生成: 東京都中央区 + 主住所 (ビル名除去済)"""
+    """geocode_address を生成。ビル名除去済・「先」除去済。"""
     addr = fw2hw(main_addr).strip()
-    # 末尾の "先" "付近" "番地先" を除去
+    # 全角/半角ダッシュを正規化
+    for dash in ["－", "−", "ｰ"]:
+        addr = addr.replace(dash, "-")
+    # 末尾の「先」「付近」「番地先」を除去
     addr = re.sub(r"(番地)?先$", "", addr)
     addr = re.sub(r"付近$", "", addr)
     return GEO_PREFIX + addr if addr else ""
+
+
+def extract_contact(text: str) -> str:
+    """テキストからメールアドレスまたは URL を抽出する"""
+    m = CONTACT_RE.search(text)
+    return m.group(0) if m else ""
 
 
 # ────────────────────────────────────────
@@ -120,17 +117,12 @@ def make_geocode_addr(main_addr: str) -> str:
 # ────────────────────────────────────────
 
 def group_by_row(words: list, gap: float = Y_GAP) -> list:
-    """
-    y 座標が近いワードを同一行にまとめる。
-    各行はワードリスト (x 順ソート済み)。
-    """
     if not words:
         return []
     by_y = sorted(words, key=lambda w: w["top"])
     rows = []
     cur = [by_y[0]]
     ref_y = by_y[0]["top"]
-
     for w in by_y[1:]:
         if w["top"] - ref_y <= gap:
             cur.append(w)
@@ -138,7 +130,6 @@ def group_by_row(words: list, gap: float = Y_GAP) -> list:
             rows.append(sorted(cur, key=lambda w: w["x0"]))
             cur = [w]
             ref_y = w["top"]
-
     if cur:
         rows.append(sorted(cur, key=lambda w: w["x0"]))
     return rows
@@ -149,60 +140,32 @@ def group_by_row(words: list, gap: float = Y_GAP) -> list:
 # ────────────────────────────────────────
 
 def classify_row(row: list, thr: dict) -> str:
-    """
-    行タイプを返す:
-      'header'     - ヘッダ行 (スキップ)
-      'page_num'   - ページ番号行 (スキップ)
-      'category'   - カテゴリ見出し行
-      'note'       - ※注記のみ行 (スキップ)
-      'name_only'  - 店舗名のみ行 (次行のプレフィックスになる)
-      'store'      - 通常店舗行
-      'skip'       - その他スキップ
-    """
     if not row:
         return "skip"
-
     y = row[0]["top"]
-    # ページ上端 (ヘッダ領域) または下端 (ページ番号)
     if y > 810 or y < 15:
         return "page_num"
-
-    # すべてのワードがスキップ対象かどうか確認
     texts = [w["text"] for w in row]
     if all(should_skip_word(t) for t in texts):
         return "header"
-
-    # カラム別に分類
     name_ws  = [w for w in row if w["x0"] < thr["name_end"]]
     addr_ws  = [w for w in row if thr["name_end"] <= w["x0"] < thr["tel_start"]]
     tel_ws   = [w for w in row if thr["tel_start"] <= w["x0"] < thr["genre_start"]]
     genre_ws = [w for w in row if w["x0"] >= thr["genre_start"]]
-
     has_useful = bool(addr_ws or tel_ws or genre_ws)
-
-    # カテゴリ見出し: 単一ワードで "N." パターン かつ x > 100 (中央付近)
     if len(row) == 1:
         w = row[0]
         if CAT_RE.match(w["text"]) and w["x0"] > 100:
             return "category"
-
-    # 注記行: name 列のみ、かつ ※ で始まるワードを含む
     if not has_useful and name_ws:
         if any(w["text"].startswith("※") for w in name_ws):
             return "note"
-
-    # 店舗名のみ行: name 列にワードあり、それ以外なし
     if not has_useful and name_ws:
-        # ヘッダ断片が含まれている場合はスキップ
         if any(should_skip_word(w["text"]) for w in name_ws):
             return "header"
         return "name_only"
-
-    # 通常店舗行: tel または genre 列にワードあり
     if tel_ws or genre_ws:
         return "store"
-
-    # addr のみあり tel/genre なし: 不明 → スキップ扱い
     return "skip"
 
 
@@ -211,16 +174,10 @@ def classify_row(row: list, thr: dict) -> str:
 # ────────────────────────────────────────
 
 def extract_store(row: list, thr: dict) -> dict:
-    """
-    店舗行を解析して辞書を返す。
-    address = PDF の住所そのまま (主住所+ビル名を結合)
-    geocode_address = 東京都中央区 + 主住所 (ビル名除去)
-    """
     name_parts  = []
-    addr_parts  = []   # addr列の全ワード
+    addr_parts  = []
     tel_parts   = []
     genre_parts = []
-
     for w in row:
         x, t = w["x0"], w["text"]
         if x < thr["name_end"]:
@@ -232,21 +189,17 @@ def extract_store(row: list, thr: dict) -> dict:
             tel_parts.append(t)
         else:
             genre_parts.append(t)
-
     main_addr = addr_parts[0] if addr_parts else ""
     building  = " ".join(addr_parts[1:]) if len(addr_parts) > 1 else ""
     full_addr = (main_addr + ("　" + building if building else "")).strip()
-
     tel   = normalize_phone(" ".join(tel_parts))
     genre = " ".join(genre_parts).strip()
-
     geocode = make_geocode_addr(main_addr)
-
     return {
         "name":            " ".join(name_parts).strip(),
         "address":         full_addr,
-        "_main_addr":      main_addr,   # エラー判定用 (CSV出力しない)
-        "_building":       building,    # エラー判定用
+        "_main_addr":      main_addr,
+        "_building":       building,
         "tel":             tel,
         "genre":           genre,
         "geocode_address": geocode,
@@ -254,47 +207,68 @@ def extract_store(row: list, thr: dict) -> dict:
 
 
 # ────────────────────────────────────────
-#  エラー判定
+#  エントリ分類 (修正版)
 # ────────────────────────────────────────
 
-def check_errors(data: dict) -> list:
-    """エラー理由のリストを返す (空リストなら正常)"""
-    errs = []
-    tel     = data["tel"]
-    addr    = data["_main_addr"]
-    bldg    = data["_building"]
+def classify_entry(data: dict) -> tuple:
+    """
+    stores.csv (store) か errors.csv (error) かを判定し、
+    note / contact フィールドを付与する。
 
-    # ─ 電話番号エラー ─
-    if "@" in tel:
-        errs.append("電話番号がメールアドレス")
-    elif not tel:
-        errs.append("電話番号なし")
-    elif not is_valid_phone(tel):
-        if "メール" in tel or "予約" in tel or tel.startswith("http"):
-            errs.append("電話番号が無効")
+    ルール:
+    - 住所に「先」付き → stores + note="address_approx"
+    - 電話番号がメール/URL → contact に移動、tel=""、stores
+    - ビル欄にメール/URL → contact 列に移動、stores
+    - 「詳細はお問合せ」かつ丁目のみ/番地なし → errors
+    """
+    tel  = data["tel"]
+    addr = data["_main_addr"]
+    bldg = data["_building"]
+
+    # ── メール/URL を contact 列へ抽出 ──────────────────────────────
+    contact = ""
+
+    # tel 欄がメール/URL の場合
+    if "@" in tel or re.search(r"https?://", tel):
+        contact = tel.strip()
+        data["tel"] = ""
+
+    # ビル欄 (または addr 欄) にメール/URL がある場合
+    if not contact:
+        contact = extract_contact(bldg) or extract_contact(addr)
+
+    data["contact"] = contact
+
+    # ── 「先」付き住所 ───────────────────────────────────────────────
+    note = ""
+    if re.search(r"\d先", addr):
+        note = "address_approx"
+        # make_geocode_addr は既に「先」を除去済み
+    data["note"] = note
+
+    # ── エラー判定 ───────────────────────────────────────────────────
+    # 丁目のみ = ブロック-ロット番号 (N-M形式) が存在しない
+    has_block_lot = bool(re.search(r"\d+[-－−]\d+|\d+番\d+号?", addr))
+    is_town_only  = not has_block_lot and bool(addr)
+
+    # 「詳細はお問合せ」表記があるか
+    has_detail_note = "詳細は" in addr or "詳細は" in bldg
+
+    # 住所に数字がそもそも無い
+    has_any_digit = bool(re.search(r"\d", addr))
+
+    if is_town_only and (has_detail_note or not has_any_digit):
+        reasons = []
+        if not has_any_digit:
+            reasons.append("住所に番地なし（地域名のみ）")
         else:
-            errs.append(f"電話番号が不正: {tel}")
+            reasons.append("住所が丁目のみで特定不可")
+        if has_detail_note:
+            reasons.append("「詳細はお問合せ」表記")
+        data["error_reason"] = "; ".join(reasons)
+        return "error", data
 
-    # ─ 住所エラー ─
-    # ビル列にメールアドレスがある場合
-    if "@" in bldg and "電話番号がメールアドレス" not in errs:
-        errs.append("電話番号がメールアドレス")
-
-    # 「先」付き住所
-    if re.search(r"\d先$", addr):
-        errs.append("住所に「先」を含む特殊表記")
-
-    # ※詳細は〜 が住所または建物欄にある
-    if "※詳細は" in addr or "※詳細は" in bldg:
-        errs.append("住所が「詳細はお問合せ」表記")
-
-    # 住所に数字がなく町名だけ (例: 「銀座」「銀座3」)
-    if addr and not re.search(r"[\d０-９]", addr):
-        errs.append("住所に番地なし")
-    elif addr and not re.search(r"[-\d丁目番地号]", addr):
-        errs.append("住所が不完全")
-
-    return errs
+    return "store", data
 
 
 # ────────────────────────────────────────
@@ -302,32 +276,23 @@ def check_errors(data: dict) -> list:
 # ────────────────────────────────────────
 
 def process_pdf(pdf_path: str, ticket_type: str, source_key: str) -> tuple:
-    """
-    PDFを処理し (stores_list, errors_list) を返す。
-    stores_list / errors_list は各々辞書のリスト。
-    """
     thr = THRESHOLDS[source_key]
     stores = []
     errors = []
-
     current_cat_no = 0
     current_cat    = ""
-    pending_name   = ""      # 名前折り返し1行目
+    pending_name   = ""
 
     with pdfplumber.open(pdf_path) as pdf:
         for page_no, page in enumerate(pdf.pages, start=1):
             words = page.extract_words(keep_blank_chars=False)
             if not words:
                 continue
-
             rows = group_by_row(words)
-
             for row in rows:
                 rtype = classify_row(row, thr)
-
                 if rtype in ("skip", "header", "page_num"):
                     continue
-
                 if rtype == "category":
                     m = CAT_RE.match(row[0]["text"])
                     if m:
@@ -335,37 +300,28 @@ def process_pdf(pdf_path: str, ticket_type: str, source_key: str) -> tuple:
                         current_cat    = m.group(2).strip()
                     pending_name = ""
                     continue
-
                 if rtype == "note":
-                    # ※注記行はスキップ (pending_name はクリアしない)
                     continue
-
                 if rtype == "name_only":
                     parts = [w["text"] for w in row
                              if w["x0"] < thr["name_end"] and not w["text"].startswith("※")]
-                    pending_name = (" ".join(parts)).strip()
+                    pending_name = " ".join(parts).strip()
                     continue
-
                 if rtype == "store":
                     data = extract_store(row, thr)
-
-                    # 名前折り返し結合
                     if pending_name:
                         data["name"] = (pending_name + " " + data["name"]).strip()
                         pending_name = ""
-
                     if not data["name"]:
                         continue
-
                     data["category_no"] = current_cat_no
                     data["category"]    = current_cat
                     data["ticket_type"] = ticket_type
                     data["_source"]     = pdf_path
                     data["_page"]       = page_no
 
-                    errs = check_errors(data)
-                    if errs:
-                        data["error_reason"] = "; ".join(errs)
+                    kind, data = classify_entry(data)
+                    if kind == "error":
                         errors.append(data)
                     else:
                         stores.append(data)
@@ -379,12 +335,12 @@ def process_pdf(pdf_path: str, ticket_type: str, source_key: str) -> tuple:
 
 STORES_FIELDS = [
     "name", "address", "tel", "category_no", "category",
-    "genre", "ticket_type", "geocode_address",
+    "genre", "ticket_type", "geocode_address", "note", "contact",
 ]
 
 ERRORS_FIELDS = [
     "name", "address", "tel", "category_no", "category",
-    "genre", "ticket_type", "geocode_address",
+    "genre", "ticket_type", "geocode_address", "note", "contact",
     "error_reason", "_source", "_page",
 ]
 
@@ -420,6 +376,28 @@ def main():
     write_csv(STORES_CSV, all_stores, STORES_FIELDS)
     write_csv(ERRORS_CSV, all_errors, ERRORS_FIELDS)
 
+    # stores.json 再生成
+    import json, os
+    os.makedirs("docs/data", exist_ok=True)
+    stores_json = []
+    for row in all_stores:
+        stores_json.append({
+            "name":            row["name"],
+            "address":         row["address"],
+            "tel":             row["tel"],
+            "contact":         row["contact"],
+            "category_no":     int(row["category_no"]),
+            "category":        row["category"],
+            "genre":           row["genre"],
+            "ticket_type":     row["ticket_type"],
+            "geocode_address": row["geocode_address"],
+            "note":            row["note"],
+            "lat":             None,
+            "lng":             None,
+        })
+    with open("docs/data/stores.json", "w", encoding="utf-8") as f:
+        json.dump({"stores": stores_json}, f, ensure_ascii=False, separators=(",", ":"))
+
     total = len(all_stores) + len(all_errors)
     print(f"\n=== サマリ ===")
     print(f"合計処理件数 : {total}")
@@ -428,19 +406,24 @@ def main():
 
     # カテゴリ別件数
     cat_stores = Counter((s["category_no"], s["category"]) for s in all_stores)
-    cat_errors = Counter((s["category_no"], s["category"]) for s in all_errors)
+    cat_errors = Counter((e["category_no"], e["category"]) for e in all_errors)
 
     print("\n--- カテゴリ別件数 (stores.csv) ---")
     for (no, cat), cnt in sorted(cat_stores.items()):
-        mark = f" [エラー {cat_errors.get((no,cat),0)}件]" if cat_errors.get((no,cat)) else ""
-        print(f"  {no:2d}. {cat}: {cnt}{mark}")
+        print(f"  {no:2d}. {cat}: {cnt}")
 
     if all_errors:
-        print("\n--- エラー行サンプル ---")
-        for row in all_errors[:10]:
-            print(f"  [{row['_source']} p{row['_page']}] {row['name']!r} / {row.get('error_reason','')}")
-        if len(all_errors) > 10:
-            print(f"  ...他 {len(all_errors)-10} 件 (errors.csv 参照)")
+        print(f"\n--- errors.csv ({len(all_errors)}件) ---")
+        for row in all_errors:
+            print(f"  [{row['_source']} p{row['_page']}] {row['name']!r}")
+            print(f"    addr={row['address']!r}")
+            print(f"    reason: {row.get('error_reason','')}")
+
+    # note 付き件数
+    note_count = sum(1 for s in all_stores if s.get("note"))
+    contact_count = sum(1 for s in all_stores if s.get("contact"))
+    print(f"\nnote='address_approx' : {note_count} 件")
+    print(f"contact 列に連絡先あり: {contact_count} 件")
 
 
 if __name__ == "__main__":
