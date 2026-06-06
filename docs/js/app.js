@@ -231,12 +231,15 @@ function buildModal() {
     item.innerHTML = `<input type="checkbox" data-cat="${n}"> ${label}`;
     item.addEventListener('click', e => {
       e.preventDefault();
+      const checkbox = item.querySelector('input');
       if (modalCatChecked.has(n)) {
         modalCatChecked.delete(n);
         item.classList.remove('checked');
+        checkbox.checked = false;
       } else {
         modalCatChecked.add(n);
         item.classList.add('checked');
+        checkbox.checked = true;
       }
     });
     grid.appendChild(item);
