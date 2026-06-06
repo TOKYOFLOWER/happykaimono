@@ -123,6 +123,9 @@ html, body {
   border-color: var(--color-primary);
   color: #fff;
 }
+.chip.active:not([data-gid="all"])::before {
+  content: '✓ ';
+}
 .chip.purple-chip.active {
   background: var(--color-purple);
   border-color: var(--color-purple);
