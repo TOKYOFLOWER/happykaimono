@@ -51,13 +51,36 @@ const ICON_PURPLE = L.divIcon({
 });
 
 // ──────────────────────────────────────
+//  起動時の初期座標を現在地から取得
+//  取得失敗 or タイムアウト(5秒) → 中央区デフォルト
+// ──────────────────────────────────────
+function getInitialPosition() {
+  const DEFAULT = { lat: 35.6762, lng: 139.7649, zoom: 13 };
+  return new Promise(resolve => {
+    if (!navigator.geolocation) { resolve(DEFAULT); return; }
+    const timer = setTimeout(() => resolve(DEFAULT), 5000);
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        clearTimeout(timer);
+        resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, zoom: 15 });
+      },
+      () => { clearTimeout(timer); resolve(DEFAULT); },
+      { timeout: 5000, maximumAge: 60000 }
+    );
+  });
+}
+
+// ──────────────────────────────────────
 //  初期化
 // ──────────────────────────────────────
 async function init() {
-  initMap();
   buildChips();
   buildModal();
   setupSearch();
+
+  // 現在地取得完了(or タイムアウト)してから地図を初期化
+  const pos = await getInitialPosition();
+  initMap(pos.lat, pos.lng, pos.zoom);
   setupGeolocation();
 
   const data = await loadData();
@@ -87,10 +110,10 @@ async function init() {
 // ──────────────────────────────────────
 //  地図初期化
 // ──────────────────────────────────────
-function initMap() {
+function initMap(lat, lng, zoom) {
   map = L.map('map', {
-    center: [35.6865, 139.7699],  // 中央区中心付近
-    zoom: 14,
+    center: [lat, lng],
+    zoom: zoom,
     zoomControl: true,
   });
 
